@@ -1,5 +1,5 @@
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -39,6 +39,7 @@ kb = ReplyKeyboardMarkup(
     ],
     one_time_keyboard=True
 )
+remove_kb = ReplyKeyboardRemove()
 
 @dp.message(Command("start"))
 async def waiting_for_course(message: Message, state: FSMContext):
@@ -59,25 +60,12 @@ async def password_handler(message: Message, state: FSMContext):
     await state.set_state(Form.waiting_for_course)
 
 @dp.message(F.text, Form.waiting_for_course)
-async def password_handler(message: Message, state: FSMContext):
-    course = message.text
-    await state.update_data(waiting_for_course=course)
-    if course == "6+":
-        data = await state.get_data()
-        await message.answer(FINAL_ALT, parse_mode="html")
-        await add_user_async([
-            message.from_user.id, 
-            message.from_user.username, 
-            data["waiting_for_name"], 
-            data["waiting_for_course"], 
-        ], worksheet)
-        await state.clear()
-        return 
+async def course_handler(message: Message, state: FSMContext):
+    course_text = message.text
+    await state.update_data(waiting_for_course=course_text)
 
-    course = int(course)
-    if course > 4:
-        data = await state.get_data()
-        await message.answer(FINAL_ALT, parse_mode="html")
+    async def process_user(data):
+        await message.answer(FINAL_ALT, parse_mode="html", reply_markup=remove_kb)
         await add_user_async([
             message.from_user.id, 
             message.from_user.username, 
@@ -85,15 +73,29 @@ async def password_handler(message: Message, state: FSMContext):
             data["waiting_for_course"], 
         ], worksheet)
         await state.clear()
-    elif course in [1, 2, 3, 4]:
-        await message.answer("""
+
+    if course_text == "6+":
+        data = await state.get_data()
+        await process_user(data)
+        return
+
+    try:
+        course = int(course_text)
+        if course > 4:
+            data = await state.get_data()
+            await process_user(data)
+        elif 1 <= course <= 4:
+            await message.answer("""
 теперь самый важный вопрос!
 
 зачем и почему ты хочешь делать поречье 46? 
-подумай немного и расскажи здесь!""")
-        await state.set_state(Form.waiting_for_question)
-    else:
-        await message.answer("Повторите ввод")
+подумай немного и расскажи здесь!""", reply_markup=remove_kb)
+            await state.set_state(Form.waiting_for_question)
+        else:
+            await message.answer("Повторите ввод", reply_markup=remove_kb)
+
+    except ValueError:
+        await message.answer("Повторите ввод (некорректный формат)", reply_markup=remove_kb)
 
 @dp.message(F.text, Form.waiting_for_question)
 async def password_handler(message: Message, state: FSMContext):
