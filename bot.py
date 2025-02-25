@@ -12,10 +12,6 @@ from settings import TOKEN, LINK
 bot = Bot(TOKEN)
 dp = Dispatcher()
 
-data = None
-last_row = None
-
-
 FINAL = f"""
 круто!
 спасибо, что рассказал, зачем и почему хочешь делать поречье 46. оно будет уже через 2,5 месяца. времени не очень много, поэтому можешь смело заходить в оргком — <a href="{LINK}">добро пожаловать</a>!
@@ -72,6 +68,7 @@ async def course_handler(message: Message, state: FSMContext):
             data["waiting_for_name"], 
             data["waiting_for_course"], 
         ], worksheet)
+        del data
         await state.clear()
 
     if course_text == "6+":

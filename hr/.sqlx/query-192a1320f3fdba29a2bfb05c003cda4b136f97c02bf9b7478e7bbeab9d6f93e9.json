@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        CREATE TABLE IF NOT EXISTS users (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            user_id INTEGER NOT NULL,\n            username TEXT,\n            name TEXT NOT NULL,\n            course TEXT NOT NULL,\n            question TEXT NOT NULL\n        )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "192a1320f3fdba29a2bfb05c003cda4b136f97c02bf9b7478e7bbeab9d6f93e9"
+}
