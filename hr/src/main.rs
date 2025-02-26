@@ -4,6 +4,10 @@ use teloxide::types::{KeyboardButton, KeyboardMarkup, Message, ParseMode, ReplyM
 use teloxide::dispatching::{dialogue::enter, dialogue::InMemStorage, UpdateHandler};
 use tracing::{info, error};
 use tracing_subscriber;
+
+use dotenv::dotenv;
+use std::env;
+
 use csv::Writer;
 use serde::Serialize;
 
@@ -14,9 +18,6 @@ use std::sync::Arc;
 
 type MyDialogue = Dialogue<FormState, InMemStorage<FormState>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-const TOKEN: &str = "7190707372:AAHGNCZr8dhT9kJ40rBa1wdLa1cHqANGXJA";
-const LINK: &str = "https://t.me/+2RbrSrUQomdlNWQy";
 
 #[derive(Debug, FromRow, Serialize)]
 struct User {
@@ -62,8 +63,14 @@ enum CommandAdmin {
     OrgList,
 }
 
-// Список разрешённых ID пользователей
-const ALLOWED_USER_IDS: &[i64] = &[870424192, 580039404];
+macro_rules! link {
+    ($text:expr) => {
+        link_impl($text, None)
+    };
+    ($text:expr, $url:expr) => {
+        link_impl($text, Some($url))
+    };
+}
 
 async fn help(bot: Bot, msg: Message) -> HandlerResult {
     bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
@@ -73,10 +80,16 @@ async fn help(bot: Bot, msg: Message) -> HandlerResult {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
-    info!("Starting bot...");
-    let bot = Bot::new(TOKEN);
 
-    let pool = SqlitePool::connect("sqlite:users.db").await.unwrap();
+    dotenv().ok();
+    let token = &env::var("TOKEN").expect("TOKEN not set");
+    let database_url = &env::var("DATABASE_URL").expect("DATABASE_URL not set");
+
+    info!("Starting bot...");
+
+    let bot = Bot::new(token);
+
+    let pool = SqlitePool::connect(database_url).await.unwrap();
     let pool = Arc::new(pool); // Обернуть pool в Arc
 
     sqlx::query!(
@@ -107,7 +120,17 @@ async fn main() {
 // Функция для проверки, разрешён ли пользователь
 fn is_admin(user_id: ChatId) -> bool {
     // info!("{}", ALLOWED_USER_IDS.contains(&user_id.0));
-    ALLOWED_USER_IDS.contains(&user_id.0)
+
+    // Загружаем переменную окружения
+    let ids_str = env::var("ALLOWED_USER_IDS").expect("IDS not set in .env");
+
+    // Разбиваем строку на массив ID
+    let ids: Vec<i64> = ids_str
+        .split(',')
+        .map(|s| s.parse::<i64>().expect("Invalid ID format")) // Используем parse
+        .collect();
+
+    ids.contains(&user_id.0)
 }
 
 async fn start(bot: Bot, msg: Message, dialogue: MyDialogue, pool: Arc<SqlitePool>) -> HandlerResult {
@@ -193,13 +216,13 @@ async fn waiting_for_course(
         Some(course) => {
             let course: String = course.into();
             if course == "6+" {
-                bot.send_message(msg.chat.id, format!("Ого!\n\nВот это действительно взрослые люди решили подключиться к нам!\nРад видеть! Не буду томить, заходи в оргком — {}!", link("добро пожаловать", LINK)))
+                bot.send_message(msg.chat.id, format!("Ого!\n\nВот это действительно взрослые люди решили подключиться к нам!\nРад видеть! Не буду томить, заходи в оргком — {}!", link!("добро пожаловать")))
                     .parse_mode(ParseMode::Html).await?;
                 add_user(pool, msg.chat.id, msg.chat.username(), full_name, course.into(), "".into()).await;
                 dialogue.exit().await?;
             } else if let Ok(course_i) = course.parse::<u8>() {
                 if course_i > 4 {
-                    bot.send_message(msg.chat.id, format!("Ого!\n\nВот это действительно взрослые люди решили подключиться к нам!\nРад видеть! Не буду томить, заходи в оргком — {}!", link("добро пожаловать", LINK)))
+                    bot.send_message(msg.chat.id, format!("Ого!\n\nВот это действительно взрослые люди решили подключиться к нам!\nРад видеть! Не буду томить, заходи в оргком — {}!", link!("добро пожаловать")))
                         .parse_mode(ParseMode::Html).await?;
                     add_user(pool, msg.chat.id, msg.chat.username(), full_name, course, "".into()).await;
                     dialogue.exit().await?;
@@ -232,7 +255,7 @@ async fn waiting_for_question(
         Some(text) => {
             bot.send_message(
                 msg.chat.id, 
-                format!("Круто!\n\nСпасибо, что рассказал, зачем и почему хочешь делать поречье 46. Оно будет уже через 2,5 месяца. Времени не очень много, поэтому можешь смело заходить в оргком — {}!", link("добро пожаловать", LINK))
+                format!("Круто!\n\nСпасибо, что рассказал, зачем и почему хочешь делать поречье 46. Оно будет уже через 2,5 месяца. Времени не очень много, поэтому можешь смело заходить в оргком — {}!", link!("добро пожаловать"))
             ).parse_mode(ParseMode::Html).await?;
             add_user(pool, msg.chat.id, msg.chat.username(), full_name, course, text.into()).await;
             dialogue.exit().await?;
@@ -289,7 +312,10 @@ async fn find_user_by_id(pool: Arc<SqlitePool>, user_id: i64) -> Result<Option<i
     Ok(chat_id)
 }
 
-fn link(text: &str, url: &str) -> String {
+fn link_impl(text: &str, url: Option<&str>) -> String {
+    let url = url.map(|u| u.to_string()).unwrap_or_else(|| {
+        env::var("LINK").expect("LINK environment variable not set")
+    });
     format!("<a href=\"{}\">{}</a>", url, text)
 }
 

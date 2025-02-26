@@ -3,5 +3,9 @@ data
 settings.py
 /hr/target
 *.log
+
 *.db
+*.db-wal
+
 output.csv
+.env
