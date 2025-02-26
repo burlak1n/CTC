@@ -5,6 +5,8 @@ use teloxide::dispatching::{dialogue::enter, dialogue::InMemStorage, UpdateHandl
 use tracing::{info, error};
 use tracing_subscriber;
 
+use tokio::time::{sleep, Duration};
+
 use dotenv::dotenv;
 use std::env;
 
@@ -16,7 +18,8 @@ use sqlx::{SqlitePool, FromRow};
 // use google_sheets4::Sheets; // Пример для Google Sheets API
 use std::sync::Arc;
 
-type MyDialogue = Dialogue<FormState, InMemStorage<FormState>>;
+type FormDialogue = Dialogue<FormState, InMemStorage<FormState>>;
+type BroadcastDialogue = Dialogue<BroadcastState, InMemStorage<BroadcastState>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, FromRow, Serialize)]
@@ -43,15 +46,26 @@ pub enum FormState {
     },
 }
 
+#[derive(Clone, Default)]
+pub enum BroadcastState {
+    #[default]
+    Start,
+    ReceiveMessage,
+    ReceiveConfirm {
+        message: String,
+        chat_ids: Vec<ChatId>,
+    },
+}
+
 /// Доступные команды:
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
 enum Command {
-    #[command(description = "Показать это сообщение.")]
+    /// Показать это сообщение
     Help,
-    #[command(description = "Начать")]
+    /// Начать
     Start,
-    #[command(description = "Отмена")]
+    /// Отмена
     Cancel,
 }
 
@@ -59,8 +73,12 @@ enum Command {
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
 enum CommandAdmin {
-    #[command(description = "Список организаторов")]
+    /// Показать это сообщение
+    Help,
+    /// Получить список организаторов в .csv
     OrgList,
+    /// Начать рассылку (Ввод текста)
+    Broadcast,
 }
 
 macro_rules! link {
@@ -74,6 +92,12 @@ macro_rules! link {
 
 async fn help(bot: Bot, msg: Message) -> HandlerResult {
     bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
+    Ok(())
+}
+
+async fn help_admin(bot: Bot, msg: Message) -> HandlerResult {
+    bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
+    bot.send_message(msg.chat.id, CommandAdmin::descriptions().to_string()).await?;
     Ok(())
 }
 
@@ -110,7 +134,7 @@ async fn main() {
 
 
     Dispatcher::builder(bot, schema())
-        .dependencies(dptree::deps![InMemStorage::<FormState>::new(), pool])
+        .dependencies(dptree::deps![InMemStorage::<FormState>::new(), InMemStorage::<BroadcastState>::new(), pool])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
@@ -133,7 +157,7 @@ fn is_admin(user_id: ChatId) -> bool {
     ids.contains(&user_id.0)
 }
 
-async fn start(bot: Bot, msg: Message, dialogue: MyDialogue, pool: Arc<SqlitePool>) -> HandlerResult {
+async fn start(bot: Bot, msg: Message, dialogue: FormDialogue, pool: Arc<SqlitePool>) -> HandlerResult {
     match find_user_by_id(pool, msg.chat.id.0).await {
         Ok(Some(user)) => {
             info!("User found: {:?}", user);
@@ -150,7 +174,7 @@ async fn start(bot: Bot, msg: Message, dialogue: MyDialogue, pool: Arc<SqlitePoo
     Ok(())
 }
 
-async fn cancel(bot: Bot, dialogue: MyDialogue, msg: Message) -> HandlerResult {
+async fn cancel(bot: Bot, dialogue: FormDialogue, msg: Message) -> HandlerResult {
     bot.send_message(msg.chat.id, "Cancelling the dialogue.").await?;
     dialogue.exit().await?;
     Ok(())
@@ -178,7 +202,7 @@ async fn orglist(bot: Bot, msg: Message, pool: Arc<SqlitePool>) -> HandlerResult
 
     writer.flush()?;
 
-    println!("Данные успешно экспортированы в output.csv");
+    info!("Данные успешно экспортированы в output.csv");
 
     bot.send_document(msg.chat.id, InputFile::file("output.csv"))
         .await?;
@@ -186,7 +210,7 @@ async fn orglist(bot: Bot, msg: Message, pool: Arc<SqlitePool>) -> HandlerResult
 }
 
 
-async fn waiting_for_name(bot: Bot, msg: Message, dialogue: MyDialogue) -> HandlerResult {
+async fn waiting_for_name(bot: Bot, msg: Message, dialogue: FormDialogue) -> HandlerResult {
     match msg.text() {
         Some(text) => {
             let keyboard = KeyboardMarkup::new(vec![
@@ -208,7 +232,7 @@ async fn waiting_for_name(bot: Bot, msg: Message, dialogue: MyDialogue) -> Handl
 async fn waiting_for_course(
     bot: Bot,
     msg: Message,
-    dialogue: MyDialogue,
+    dialogue: FormDialogue,
     full_name: String, // Available from `State::ReceiveAge`.
     pool: Arc<SqlitePool>,
 ) -> HandlerResult {
@@ -247,7 +271,7 @@ async fn waiting_for_course(
 async fn waiting_for_question(
     bot: Bot,
     msg: Message,
-    dialogue: MyDialogue,
+    dialogue: FormDialogue,
     (full_name, course): (String, String), // Available from `State::ReceiveAge`.
     pool: Arc<SqlitePool>,
 ) -> HandlerResult {
@@ -319,6 +343,96 @@ fn link_impl(text: &str, url: Option<&str>) -> String {
     format!("<a href=\"{}\">{}</a>", url, text)
 }
 
+async fn start_broadcast(bot: Bot, msg: Message, dialogue: BroadcastDialogue) -> HandlerResult {
+    // info!(": {:?}", msg.chat.id.0);
+    bot.send_message(msg.chat.id, "Введи текст рассылки!").await?;
+    dialogue.update(BroadcastState::ReceiveMessage).await?;
+
+    Ok(())
+}
+
+async fn get_broadcast(bot: Bot, msg: Message, dialogue: BroadcastDialogue, pool: Arc<SqlitePool>) -> HandlerResult {
+    match msg.text() {
+        Some(text) => {
+            let keyboard = KeyboardMarkup::new(vec![
+                vec![KeyboardButton::new("Отправка"), KeyboardButton::new("Отмена")],
+            ]).one_time_keyboard();
+
+            let rows = sqlx::query!(
+                r#"
+                SELECT chat_id
+                FROM users
+                "#,
+            )
+            .fetch_all(&*pool) // Получаем все строки
+            .await?;
+
+            // Преобразуем результат в массив ChatId
+            let chat_ids: Vec<ChatId> = rows
+                .into_iter()
+                .map(|row| ChatId(row.chat_id)) // Преобразуем i64 в ChatId
+                .collect();
+
+            bot.send_message(msg.chat.id, format!("\
+            Сообщение ниже будет отправлено {} людям. Выбери опцию на клавиатуре\n
+{}
+            ", chat_ids.len(), text))
+                .reply_markup(keyboard)
+                .await?;
+            dialogue.update(BroadcastState::ReceiveConfirm { message: text.into(), chat_ids: chat_ids }).await?;
+        }
+        None => {
+            bot.send_message(msg.chat.id, "Отправь мне текст!").await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn send_broadcast(
+    bot: Bot,
+    msg: Message,
+    dialogue: BroadcastDialogue,
+    (message, chat_ids): (String, Vec<ChatId>),
+) -> HandlerResult {
+    match msg.text() {
+        Some(text) => {
+            match text.to_lowercase().as_str() {
+                "отправка" => {
+                    let delay = Duration::from_secs(1);
+                    // Вызываем функцию для рассылки
+                    for chat_id in chat_ids {
+                        match bot.send_message(chat_id, format!("{}", message)).await {
+                            Ok(_) => info!("Сообщение отправлено в чат {}", chat_id),
+                            Err(e) => error!("Не удалось отправить сообщение в чат {}: {}", chat_id, e),
+                        }
+                        // Добавляем задержку между сообщениями
+                        sleep(delay).await;
+                    }
+                    bot.send_message(msg.chat.id, "Рассылка успешно завершена!").await?;
+                    dialogue.exit().await?; // Завершаем диалог
+                }
+                "отмена" => {
+                    // Завершаем диалог
+                    bot.send_message(msg.chat.id, "Рассылка отменена").await?;
+                    dialogue.exit().await?;
+                }
+                _ => {
+                    // Если текст не "Отправить" и не "Отменить", просим уточнить
+                    bot.send_message(msg.chat.id, "Пожалуйста, выберите 'Отправить' или 'Отменить'.").await?;
+                }
+            }
+        }
+        None => {
+            // Если сообщение не содержит текста
+            bot.send_message(msg.chat.id, "Отправь мне текст!").await?;
+        }
+    }
+
+    Ok(())
+}
+
+
 fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>> {
     use dptree::case;
 
@@ -330,7 +444,7 @@ fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>>
         )
         .branch(case![Command::Cancel].endpoint(cancel));
 
-        let admin_command_handler = teloxide::filter_command::<CommandAdmin, _>()
+    let admin_command_handler = teloxide::filter_command::<CommandAdmin, _>()
         .filter(|msg: Message| {
             if let Some(chat_id) = msg.chat_id() {
                 is_admin(chat_id)
@@ -338,18 +452,31 @@ fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>>
                 false
             }
         })
-        .branch(case![CommandAdmin::OrgList].endpoint(orglist));
-    let message_handler = Update::filter_message()
-        .branch(admin_command_handler)
+        .branch(case![CommandAdmin::Help].endpoint(help_admin))
+        .branch(case![CommandAdmin::OrgList].endpoint(orglist))
+        .branch(case![CommandAdmin::Broadcast].endpoint(start_broadcast));
+
+    let form_handler = Update::filter_message()
+        .enter_dialogue::<Message, InMemStorage<FormState>, FormState>()
         .branch(command_handler)
-        .branch(dptree::case![FormState::Start].endpoint(start))
-        .branch(dptree::case![FormState::ReceiveFullName].endpoint(waiting_for_name))
-        .branch(dptree::case![FormState::ReceiveCourse { full_name }].endpoint(waiting_for_course))
+        .branch(case![FormState::ReceiveFullName].endpoint(waiting_for_name))
+        .branch(case![FormState::ReceiveCourse { full_name }].endpoint(waiting_for_course))
         .branch(
-            dptree::case![FormState::ReceiveQuestion { full_name, course }]
-            .endpoint(waiting_for_question)
+            case![FormState::ReceiveQuestion { full_name, course }]
+                .endpoint(waiting_for_question),
         );
 
-    enter::<Update, InMemStorage<FormState>, FormState, _>()
-        .branch(message_handler)
+    let broadcast_handler = Update::filter_message()
+        .enter_dialogue::<Message, InMemStorage<BroadcastState>, BroadcastState>()
+        .branch(admin_command_handler)
+        .branch(case![BroadcastState::ReceiveMessage].endpoint(get_broadcast))
+        .branch(
+            case![BroadcastState::ReceiveConfirm { message, chat_ids }]
+                .endpoint(send_broadcast),
+        );
+
+    // Объединяем обработчики
+    dptree::entry()
+        .branch(broadcast_handler)
+        .branch(form_handler)
 }

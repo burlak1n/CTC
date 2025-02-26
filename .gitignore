@@ -6,6 +6,6 @@ settings.py
 
 *.db
 *.db-wal
-
+*.db-shm
 output.csv
 .env
