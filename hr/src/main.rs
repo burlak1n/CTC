@@ -4,13 +4,12 @@ use teloxide::types::{KeyboardButton, KeyboardMarkup, Message, ParseMode, ReplyM
 use teloxide::dispatching::{dialogue::enter, dialogue::InMemStorage, UpdateHandler};
 use tracing::{info, error};
 use tracing_subscriber;
-
 use tokio::time::{sleep, Duration};
 
 use dotenv::dotenv;
 use std::env;
 
-use csv::Writer;
+use csv::{Writer, Reader};
 use serde::Serialize;
 
 use sqlx::{SqlitePool, FromRow};
@@ -29,7 +28,8 @@ struct User {
     username: Option<String>,   // Имя пользователя (например, из Telegram)
     name: String,       // Имя пользователя
     course: String,     // Курс
-    question: String,   // Вопрос
+    question: Option<String>,   // Вопрос
+    mailing: bool, // будет ли присылаться рассылка
 }
 
 #[derive(Clone, Default)]
@@ -65,6 +65,8 @@ enum Command {
     Help,
     /// Начать
     Start,
+    /// Включает/Выключает рассылку
+    Mailing,
     /// Отмена
     Cancel,
 }
@@ -114,24 +116,14 @@ async fn main() {
     let bot = Bot::new(token);
 
     let pool = SqlitePool::connect(database_url).await.unwrap();
+    if false {
+        insert_csv_into_sqlite(&pool, "users.csv", "users").await;
+    }
+        
     let pool = Arc::new(pool); // Обернуть pool в Arc
 
-    sqlx::query!(
-        r#"
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            username TEXT,
-            name TEXT NOT NULL,
-            course TEXT NOT NULL,
-            question TEXT NOT NULL
-        )
-        "#
-    )
-    .execute(&*pool)
-    .await
-    .unwrap();
 
+    
 
     Dispatcher::builder(bot, schema())
         .dependencies(dptree::deps![InMemStorage::<FormState>::new(), InMemStorage::<BroadcastState>::new(), pool])
@@ -139,6 +131,57 @@ async fn main() {
         .build()
         .dispatch()
         .await;
+}
+
+/// Функция для динамической вставки данных из CSV в SQLite
+async fn insert_csv_into_sqlite(
+    pool: &SqlitePool,
+    csv_path: &str,
+    table_name: &str,
+) -> HandlerResult {
+    // Чтение CSV-файла
+    let mut rdr = Reader::from_path(csv_path)?;
+
+    // Получите заголовки CSV-файла
+    let headers = rdr.headers()?.clone();
+
+    // Создайте таблицу, если она не существует
+    let create_table_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {} ({});",
+        table_name,
+        headers
+            .iter()
+            .map(|header| format!("{} TEXT", header))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    sqlx::query(&create_table_sql).execute(pool).await?;
+
+    // Вставка данных в SQLite
+    for result in rdr.records() {
+        let record = result?;
+
+        let columns = headers
+            .iter()
+            .map(|header| header.to_string())
+            .collect::<Vec<_>>();
+
+        let values = record
+            .iter()
+            .map(|value| format!("'{}'", value))
+            .collect::<Vec<_>>();
+
+        let insert_sql = format!(
+            "INSERT INTO {} ({}) VALUES ({});",
+            table_name,
+            columns.join(", "),
+            values.join(", ")
+        );
+
+        sqlx::query(&insert_sql).execute(pool).await?;
+    }
+
+    Ok(())
 }
 
 // Функция для проверки, разрешён ли пользователь
@@ -362,6 +405,7 @@ async fn get_broadcast(bot: Bot, msg: Message, dialogue: BroadcastDialogue, pool
                 r#"
                 SELECT chat_id
                 FROM users
+                WHERE mailing = TRUE
                 "#,
             )
             .fetch_all(&*pool) // Получаем все строки
@@ -433,6 +477,30 @@ async fn send_broadcast(
 }
 
 
+async fn mailing(bot: Bot, msg: Message, pool: Arc<SqlitePool>) -> HandlerResult {
+    // Обновляем значение mailing на противоположное и получаем новое значение
+    let row = sqlx::query!(
+        r#"
+        UPDATE users
+        SET mailing = NOT mailing
+        WHERE chat_id = ?
+        RETURNING mailing
+        "#,
+        msg.chat.id.0
+    )
+    .fetch_one(&*pool) // Получаем обновлённое значение
+    .await?;
+
+    // Отправляем сообщение пользователю в зависимости от нового значения
+    if row.mailing {
+        bot.send_message(msg.chat.id, "Рассылки включены 🟢").await?;
+    } else {
+        bot.send_message(msg.chat.id, "Рассылки отключены 🔴").await?;
+    }
+
+    Ok(())
+}
+
 fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>> {
     use dptree::case;
 
@@ -440,9 +508,10 @@ fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>>
         .branch(
             case![FormState::Start]
                 .branch(case![Command::Help].endpoint(help))
-                .branch(case![Command::Start].endpoint(start)),
-        )
-        .branch(case![Command::Cancel].endpoint(cancel));
+                .branch(case![Command::Start].endpoint(start))
+                .branch(case![Command::Cancel].endpoint(cancel))
+                .branch(case![Command::Mailing].endpoint(mailing)),
+        );
 
     let admin_command_handler = teloxide::filter_command::<CommandAdmin, _>()
         .filter(|msg: Message| {

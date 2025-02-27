@@ -7,5 +7,6 @@ settings.py
 *.db
 *.db-wal
 *.db-shm
-output.csv
+*.csv
 .env
+20250227121420_insert.sql

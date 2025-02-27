@@ -5,5 +5,6 @@ CREATE TABLE users (
     username TEXT,
     name TEXT NOT NULL,
     course TEXT NOT NULL,
-    question TEXT NOT NULL
+    question TEXT,
+    mailing BOOLEAN NOT NULL DEFAULT TRUE
 );
